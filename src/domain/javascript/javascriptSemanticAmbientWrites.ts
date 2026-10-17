@@ -16,7 +16,12 @@ import {
   type JavaScriptSemanticAnalysisState,
 } from "./javascriptSemanticState.js";
 import { isImportMetaUrl } from "./javascriptStaticAnalysisHelpers.js";
-import { semanticMutationInitializers } from "./javascriptSemanticMutationInitializers.js";
+import { semanticBindingAtRead } from "./javascriptSemanticMutationInitializers.js";
+import {
+  semanticIterationSources,
+  type SemanticIterationSource,
+} from "./javascriptSemanticIterationSources.js";
+import { createSemanticReturnedReferences } from "./javascriptSemanticReturnedReferences.js";
 
 const GLOBAL_OBJECT_NAMES = ["globalThis", "global", "window", "self"];
 
@@ -42,17 +47,36 @@ type AmbientPath = readonly (string | null)[];
 /** Undefined means a cyclic or conflicting projection can select any depth. */
 type AmbientProjection = AmbientPath | undefined;
 
+interface AmbientStoredReference {
+  readonly path: AmbientProjection;
+  readonly source: SemanticIterationSource;
+}
+
+interface AmbientReferenceFacts {
+  readonly stores: WeakMap<t.Node, AmbientStoredReference[]>;
+  readonly prototypeTarget: (node: t.Node) => t.Node | undefined;
+  readonly freshObject: (node: t.Node) => boolean;
+}
+
 /**
  * Follow local object identities without equating shallow copies with their
- * sources. Write lookup retains every visible initializer: reassigning an alias
- * later cannot erase a possible earlier mutation. Intrinsic reads stay strict.
+ * sources. Writes select aliases at their capture; uncertain execution order
+ * retains possible initializers. Intrinsic reads stay strict.
  */
-const createAmbientPathResolver = (
+export const createAmbientPathResolver = (
   state: JavaScriptSemanticAnalysisState,
   possibleWrites: boolean,
+  facts?: AmbientReferenceFacts,
 ) => {
   const cached = new WeakMap<t.Node, readonly AmbientPath[]>();
-  return (node: t.Node, capture?: t.Node): readonly AmbientPath[] => {
+  const returnedReferences = createSemanticReturnedReferences(state);
+  return (
+    node: t.Node,
+    capture?: t.Node,
+    escapedContents = false,
+    projection: AmbientProjection = [],
+    localIdentity?: (node: t.Node, path: AmbientProjection) => void,
+  ): readonly AmbientPath[] => {
     const prior = possibleWrites ? undefined : cached.get(node);
     if (prior !== undefined) return prior;
     const result = new Map<string, AmbientPath>();
@@ -62,7 +86,7 @@ const createAmbientPathResolver = (
       node: t.Node;
       suffix: AmbientProjection;
       readsAtSelf?: true;
-    }[] = [{ node, suffix: [] }];
+    }[] = [{ node, suffix: projection }];
     // Join projections at their producing expression, rather than enumerating
     // alias histories. Each key can only widen to a wildcard, and conflicting
     // depths widen to unknown, so diamonds and cycles have finite state.
@@ -114,6 +138,48 @@ const createAmbientPathResolver = (
           suffix: path,
           ...(current.readsAtSelf && { readsAtSelf: true }),
         });
+      if (!t.isIdentifier(root) && facts?.freshObject(root)) {
+        localIdentity?.(root, suffix);
+        for (const stored of facts?.stores.get(root) ?? []) {
+          const selected =
+            suffix === undefined ||
+            stored.path === undefined ||
+            stored.path.every(
+              (key, index) =>
+                index >= suffix.length ||
+                key === null ||
+                suffix[index] === null ||
+                key === suffix[index],
+            );
+          if (
+            !selected ||
+            (suffix !== undefined &&
+              stored.path !== undefined &&
+              suffix.length < stored.path.length &&
+              !escapedContents)
+          )
+            continue;
+          const remaining =
+            suffix === undefined || stored.path === undefined
+              ? undefined
+              : suffix.slice(stored.path.length);
+          pending.push({
+            node: stored.source.node,
+            readsAtSelf: true,
+            suffix:
+              remaining === undefined
+                ? undefined
+                : [
+                    ...stored.source.projection.map((key) =>
+                      key === null || typeof key === "object"
+                        ? null
+                        : String(key),
+                    ),
+                    ...remaining,
+                  ],
+          });
+        }
+      }
       if (
         t.isMetaProperty(root) &&
         root.meta.name === "import" &&
@@ -144,8 +210,8 @@ const createAmbientPathResolver = (
         const initializers = possibleWrites
           ? readAt === undefined
             ? binding.initializers
-            : semanticMutationInitializers(binding, readAt, state.parentsByNode)
-                .initializers
+            : semanticBindingAtRead(binding, readAt, state.parentsByNode)
+                .binding.initializers
           : stable === undefined
             ? []
             : [stable];
@@ -165,6 +231,54 @@ const createAmbientPathResolver = (
           });
         continue;
       }
+      if (
+        possibleWrites &&
+        t.isNewExpression(root) &&
+        suffix?.[0] === "__proto__"
+      ) {
+        continueWith(root.callee, ["prototype", ...suffix.slice(1)]);
+        continue;
+      }
+      const prototypeTarget = possibleWrites
+        ? facts?.prototypeTarget(root)
+        : undefined;
+      if (prototypeTarget !== undefined) {
+        continueWith(
+          prototypeTarget,
+          suffix === undefined ? undefined : ["__proto__", ...suffix],
+        );
+        continue;
+      }
+      if (
+        possibleWrites &&
+        (t.isCallExpression(root) ||
+          t.isOptionalCallExpression(root) ||
+          t.isNewExpression(root) ||
+          t.isTaggedTemplateExpression(root) ||
+          (escapedContents && (t.isFunction(root) || t.isClass(root))))
+      ) {
+        for (const source of returnedReferences(
+          t.isFunction(root) || t.isClass(root)
+            ? root
+            : t.isTaggedTemplateExpression(root)
+              ? root.tag
+              : root.callee,
+        ))
+          continueWith(
+            source.node,
+            suffix === undefined
+              ? undefined
+              : [
+                  ...source.projection.map((key) =>
+                    key === null || typeof key === "object"
+                      ? null
+                      : String(key),
+                  ),
+                  ...suffix,
+                ],
+          );
+        continue;
+      }
       if (possibleWrites && t.isConditionalExpression(root)) {
         continueWith(root.consequent);
         continueWith(root.alternate);
@@ -175,7 +289,32 @@ const createAmbientPathResolver = (
         continueWith(root.right);
         continue;
       }
+      if (possibleWrites && t.isSequenceExpression(root)) {
+        const value = root.expressions.at(-1);
+        if (value !== undefined) continueWith(value);
+        continue;
+      }
       const key = suffix?.[0];
+      // Container escapes reuse the finite worklist, including alias cycles.
+      if (escapedContents && suffix?.length === 0) {
+        if (t.isObjectExpression(root)) {
+          for (const property of root.properties)
+            if (t.isSpreadElement(property))
+              continueWith(property.argument, []);
+            else if (
+              t.isObjectProperty(property) &&
+              t.isExpression(property.value)
+            )
+              continueWith(property.value, []);
+          continue;
+        }
+        if (t.isArrayExpression(root)) {
+          for (const element of root.elements)
+            if (t.isSpreadElement(element)) continueWith(element.argument, []);
+            else if (t.isExpression(element)) continueWith(element, []);
+          continue;
+        }
+      }
       if (suffix !== undefined && key === undefined) continue;
       if (t.isObjectExpression(root)) {
         if (possibleWrites) {
@@ -257,12 +396,43 @@ export function* indexJavaScriptAmbientWritesSteps(
   state: JavaScriptSemanticAnalysisState,
 ): Generator<void> {
   const ambientReads = createAmbientPathResolver(state, false);
-  const ambientWrites = createAmbientPathResolver(state, true);
+  const browserReceiverMethods = new Set<string>();
+  const storedSites = new WeakSet<t.Node>();
+  const storedReferences: SemanticIterationSource[] = [];
+  const writes: { node: t.Node; path: AmbientPath }[] = [];
+  const targets: { node: t.Node; capture: t.Node }[] = [];
+  const escapes: {
+    node: t.Node;
+    target: t.Node;
+    browserReceiver: boolean;
+    projection?: AmbientProjection;
+  }[] = [];
+  const stores = new WeakMap<t.Node, AmbientStoredReference[]>();
   const interop = createSemanticModuleInterop(state, {
     intrinsicPath: (node) => {
       const [path] = ambientReads(node);
       return path?.[0] === "global" && path.every((key) => key !== null)
         ? ["intrinsic", ...(path.slice(1) as readonly string[])]
+        : undefined;
+    },
+  });
+  const ambientWrites = createAmbientPathResolver(state, true, {
+    stores,
+    freshObject: interop.isFreshObject,
+    prototypeTarget: (node) => {
+      if (!t.isCallExpression(node) && !t.isOptionalCallExpression(node))
+        return undefined;
+      const invocation = interop.intrinsicInvocation(node);
+      if (
+        invocation?.kind !== "known" ||
+        invocation.path.length !== 3 ||
+        !["Object", "Reflect"].includes(invocation.path[1] ?? "") ||
+        invocation.path[2] !== "getPrototypeOf"
+      )
+        return undefined;
+      const target = invocation.arguments?.[0];
+      return t.isNode(target) && !t.isSpreadElement(target)
+        ? target
         : undefined;
     },
   });
@@ -276,16 +446,110 @@ export function* indexJavaScriptAmbientWritesSteps(
           isUnshadowedGlobal(root, state, root.name)
           ? [["global", root.name]]
           : [];
-      return ambientWrites(root, writeSite);
+      if (!storedSites.has(writeSite)) {
+        storedSites.add(writeSite);
+        for (const source of semanticIterationSources(
+          writeSite,
+          state.parentsByNode.get(writeSite) ?? null,
+        )) {
+          if (source.kind === "reference-store") storedReferences.push(source);
+        }
+      }
+      // Resolve identities after the traversal has collected every local store.
+      const id = targets.push({ node: root, capture: writeSite }) - 1;
+      return [["pending-target", String(id)]];
     },
     interop.intrinsicInvocation,
     interop.staticString,
     interop.isFreshObject,
     (node, path) => {
-      state.ambientWrites.retain(path);
-      state.ambientWriteEffects.push({ path, node });
+      writes.push({ node, path });
+    },
+    (node, invocation) => {
+      // Escaping objects can change contents without replacing their identity.
+      const retainEscape = (target: t.Node, browserReceiver = false) => {
+        escapes.push({ target, node, browserReceiver });
+      };
+      for (const argument of t.isTaggedTemplateExpression(node)
+        ? node.quasi.expressions
+        : node.arguments)
+        if (t.isNode(argument))
+          retainEscape(
+            t.isSpreadElement(argument) ? argument.argument : argument,
+          );
+      const callee = unwrapJavaScriptExpression(
+        t.isTaggedTemplateExpression(node) ? node.tag : node.callee,
+      ).node;
+      const browserMethod =
+        invocation?.kind === "known" &&
+        invocation.path.length === 2 &&
+        ["open", "fetch"].includes(invocation.path[1] ?? "")
+          ? invocation.path[1]
+          : undefined;
+      if (
+        !t.isNewExpression(node) &&
+        (t.isMemberExpression(callee) ||
+          t.isOptionalMemberExpression(callee)) &&
+        !(
+          invocation?.kind === "known" &&
+          ["Object", "Reflect"].includes(invocation.path[1] ?? "")
+        )
+      ) {
+        if (browserMethod !== undefined)
+          browserReceiverMethods.add(browserMethod);
+        retainEscape(callee.object, browserMethod !== undefined);
+      }
     },
   );
+  for (const source of storedReferences) {
+    if (source.target === undefined) continue;
+    const identities: { node: t.Node; path: AmbientProjection }[] = [];
+    ambientWrites(source.target, source.mutation, false, [], (node, path) => {
+      identities.push({ node, path });
+    });
+    const ambient = ambientWrites(source.target.object, source.mutation);
+    for (const { node, path } of identities) {
+      const entries = stores.get(node) ?? [];
+      entries.push({ path, source });
+      stores.set(node, entries);
+    }
+    if (identities.length === 0 || ambient.length > 0)
+      escapes.push({
+        node: source.mutation,
+        target: source.node,
+        browserReceiver: false,
+        projection: source.projection.map((key) =>
+          key === null || typeof key === "object" ? null : String(key),
+        ),
+      });
+  }
+  for (const { node, path } of writes) {
+    const target =
+      path[0] === "pending-target" ? targets[Number(path[1])] : undefined;
+    const paths =
+      target === undefined
+        ? [path]
+        : ambientWrites(target.node, target.capture).map((identity) => [
+            ...identity,
+            ...path.slice(2),
+          ]);
+    for (const resolved of paths) {
+      state.ambientWrites.retain(resolved);
+      state.ambientWriteEffects.push({ path: resolved, node });
+    }
+  }
+  for (const { node, target, browserReceiver, projection } of escapes)
+    for (const path of ambientWrites(target, node, true, projection))
+      // Only proven browser APIs keep their global receiver from user code.
+      if (!(browserReceiver && path.length === 1 && path[0] === "global"))
+        state.ambientEscapes.retain([...path, null]);
+  // A function may call a browser method replaced later in source order.
+  if (
+    [...browserReceiverMethods].some((method) =>
+      state.ambientWrites.covers(["global", method]),
+    )
+  )
+    state.ambientEscapes.retain(["global", null]);
 }
 
 /**

@@ -1,4 +1,5 @@
 import * as t from "@babel/types";
+import { semanticOpaqueGlobalMayHaveChanged } from "./javascriptSemanticOpaqueEffects.js";
 import { traverseJavaScriptAst } from "./javascriptSemanticTraversal.js";
 
 import { htmlUrlText, stripQueryAndFragment } from "../artifactPathSyntax.js";
@@ -46,7 +47,10 @@ import {
   evaluateSemanticExpression,
   evaluateSemanticExpressionProvenance,
 } from "./javascriptSemanticValues.js";
-import { semanticTopLevelEffectFollowsCapture } from "./javascriptSemanticMutationInitializers.js";
+import {
+  semanticBindingAtRead,
+  semanticTopLevelEffectFollowsCapture,
+} from "./javascriptSemanticMutationInitializers.js";
 import {
   semanticFactoryLoaderMemberAt,
   semanticFactoryRequireLoaderAt,
@@ -472,6 +476,33 @@ const inspectEndpointCall = (
   // A local or shadowed function with a familiar network name is not a known
   // browser request API. Do not let the literal fallback turn it into one.
   if (isNetworkRequestSpelling(name)) return;
+  if (first !== undefined && /(?:^|\.)(?:get|delete)$/u.test(name)) {
+    // Apply existing literal exclusions before requesting whole-source alias
+    // mutation facts. Inline receivers and unbound names need no such index.
+    if (
+      endpointArgumentHelper(
+        name,
+        node.arguments,
+        node.callee,
+        context.openReceiverFacts?.get(node.start ?? -1),
+      ) === undefined
+    )
+      return;
+    const mapLookup = isMapLookup(node, bindings);
+    if (mapLookup === true) return;
+    if (mapLookup === undefined) {
+      context.accumulator.pendingNetworkCalls.push({ node, name });
+      return;
+    }
+  }
+  inspectLiteralEndpointCall(node, name, context);
+};
+
+const inspectLiteralEndpointCall = (
+  node: JavaScriptCallLike,
+  name: string,
+  context: FindingContext,
+): void => {
   const receiverFact = context.openReceiverFacts?.get(node.start ?? -1);
   const endpoint = endpointArgumentHelper(
     name,
@@ -531,6 +562,11 @@ export const finishPartialNetworkEndpoints = (
   index: JavaScriptBindingIndex,
 ): void => {
   for (const { node, name } of context.accumulator.pendingNetworkCalls) {
+    if (!isKnownNetworkRequest(node, bindings)) {
+      if (!isMapLookup(node, bindings, index))
+        inspectLiteralEndpointCall(node, name, context);
+      continue;
+    }
     const target = argumentNode(node.arguments[0]);
     if (target === undefined) continue;
     const resolved = resolvedRequestTarget(target, node, bindings, index);
@@ -547,6 +583,60 @@ export const finishPartialNetworkEndpoints = (
   context.accumulator.endpoints.sort(
     (left, right) => left.offset - right.offset,
   );
+};
+
+/** Undefined requests mutation facts only after proving a local Map origin. */
+const isMapLookup = (
+  node: JavaScriptCallLike,
+  bindings: JavaScriptSemanticAnalysisState,
+  index?: JavaScriptBindingIndex,
+): boolean | undefined => {
+  const callee = unwrapJavaScriptExpression(node.callee).node;
+  if (!t.isMemberExpression(callee) && !t.isOptionalMemberExpression(callee))
+    return false;
+  const method = semanticStaticPropertyName(callee.property, callee.computed);
+  if (method !== "get" && method !== "delete") return false;
+  if (
+    ["Map", "Object"].some(
+      (owner) =>
+        bindings.ambientWrites.covers(["global", owner, "prototype", method]) ||
+        bindings.ambientEscapes.covers(["global", owner, "prototype", method]),
+    )
+  )
+    return false;
+  let receiver = unwrapJavaScriptExpression(callee.object).node;
+  const seen = new Set<string>();
+  while (t.isIdentifier(receiver)) {
+    if (
+      index !== undefined &&
+      (index.referenceMayHaveChangedAt(node, receiver, [method]) ||
+        index.referenceMayHaveChangedAt(node, receiver, ["__proto__"]))
+    )
+      return false;
+    const binding = resolveSemanticBindingState(
+      bindings,
+      receiver,
+      receiver.name,
+    );
+    if (binding === undefined || seen.has(binding.bindingId)) return false;
+    seen.add(binding.bindingId);
+    const initializer = semanticStableInitializer(binding, bindings);
+    if (
+      initializer === undefined ||
+      initializer.projection.length !== 0 ||
+      !semanticBindingAtRead(binding, receiver, bindings.parentsByNode)
+        .hasDefiniteInitializer
+    )
+      return false;
+    receiver = unwrapJavaScriptExpression(initializer.node).node;
+  }
+  if (
+    !t.isNewExpression(receiver) ||
+    !isUnmodifiedGlobalReference(receiver.callee, bindings, "Map")
+  )
+    return false;
+  if (semanticOpaqueGlobalMayHaveChanged(callee, bindings)) return false;
+  return index === undefined && seen.size > 0 ? undefined : true;
 };
 
 const addPartialNetworkEndpoint = (

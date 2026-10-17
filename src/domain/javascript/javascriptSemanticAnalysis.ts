@@ -923,6 +923,7 @@ const createState = (
       sloppySites: new WeakSet(),
       byScope: new Map(),
       children: new Map(),
+      globalSites: [],
     },
     staticImportResolutionMode,
     valueResourceLimits: new Set(),
@@ -945,6 +946,7 @@ const createState = (
     requiredModuleEffects: new Map(),
     ambientBindingWrites: new Map(),
     ambientWrites: new SemanticPropertyPathCoverage(),
+    ambientEscapes: new SemanticPropertyPathCoverage(),
     ambientWriteEffects: [],
   };
 };
@@ -962,7 +964,10 @@ function* collectDefinitionsSteps(
     readonly scope: JavaScriptSemanticScopeState;
     readonly conditionallySkipped: boolean;
   }[] = [];
-  const opaqueCandidates: { node: t.CallExpression; scopeId: string }[] = [];
+  const opaqueCandidates: {
+    node: t.CallExpression | t.OptionalCallExpression;
+    scopeId: string;
+  }[] = [];
   let needsPrototypeFacts = false;
   const functionBodies: {
     readonly body: t.BlockStatement;
@@ -1040,12 +1045,7 @@ function* collectDefinitionsSteps(
         state,
       });
       bindInnerDeclaration(node, parent, scope, state);
-      if (
-        t.isCallExpression(node) &&
-        t.isIdentifier(unwrapJavaScriptExpression(node.callee).node, {
-          name: "eval",
-        })
-      )
+      if (t.isCallExpression(node) || t.isOptionalCallExpression(node))
         opaqueCandidates.push({ node, scopeId: scope.scopeId });
       if (
         t.isVariableDeclarator(node) &&
@@ -1096,7 +1096,8 @@ function* collectDefinitionsSteps(
           copyParameterToBody({ identifier, body, scope, state });
   }
   indexSemanticOpaqueEffects(opaqueCandidates, state);
-  if (opaqueCandidates.length > 0) clearSemanticValueCaches(state);
+  if (state.opaqueEffects.globalSites.length > 0)
+    clearSemanticValueCaches(state);
 }
 
 type PrototypeOwner = "Object" | "Array" | "String";
