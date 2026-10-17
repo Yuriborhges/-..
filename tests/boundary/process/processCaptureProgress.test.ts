@@ -590,8 +590,12 @@ itWithCaptureCapability(
       controller.abort();
       await completion;
     }
+    // The terminal line is sent after cleanup verification, which may wait up
+    // to the lifecycle's 1 s delivery grace, so the default 1 s poll window is
+    // shorter than the behaviour it observes. Use the same window as the
+    // running-line poll above.
     await expect
-      .poll(() => cancelling.notifications.join("\n"))
+      .poll(() => cancelling.notifications.join("\n"), { timeout: 4_000 })
       .toContain("disposition=cancelled");
     expect(cancelling.notifications.join("\n")).toContain(
       "owned_process_group=cleaned",
