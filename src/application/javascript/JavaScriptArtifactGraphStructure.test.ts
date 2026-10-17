@@ -98,6 +98,11 @@ const contextFor = (
     chunkNodes: new Map(),
     moduleNodes: new Map(),
     containerNodes: new Map(),
+    applicationRootsBySource: new Map(),
+    applicationOwnershipUnknownContainers: new Set(),
+    applicationModuleGapSources: new Map(),
+    applicationPossibleRootsByContainer: new Map(),
+    applicationModuleImportsExamined: new Set(),
   };
 };
 
