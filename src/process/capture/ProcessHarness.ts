@@ -272,6 +272,11 @@ const startCaptureRuntime = async (
       scenario.executable,
       options.signal,
     );
+    // Sampling ends with awaited descriptor stat and close calls, so a caller
+    // cancellation can arrive after the sampler's last internal check. A
+    // completed sample establishes file facts; it must not authorize a launch
+    // for an operation that has already been cancelled.
+    assertNotCancelled(options.signal);
     const startedAt = new Date();
     const started = monotonicProcessCaptureClock();
     let lastOutput = started;
