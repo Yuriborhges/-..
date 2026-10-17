@@ -347,6 +347,7 @@ export class TsharkCaptureProvider implements PacketCapturePort {
         const matchingPackets = parsePacketOutput(
           output.stdout.text,
           input.fields,
+          capturedOutput,
         );
         const start = Math.min(input.match_offset, matchingPackets.length);
         const end =
@@ -444,7 +445,12 @@ export class TsharkCaptureProvider implements PacketCapturePort {
       readonly command_timeout_ms: number;
     } = LIMITS,
   ): AnalysisError {
-    if (cause instanceof AnalysisError) return cause;
+    if (cause instanceof AnalysisError) {
+      if (observedOutput !== undefined && cause.capturedOutput === undefined) {
+        Object.assign(cause, { capturedOutput: observedOutput });
+      }
+      return cause;
+    }
     if (cause instanceof ArtifactReaderFailure && cause.cleanup !== undefined)
       return this.#resources.cleanupFailure(
         cause,

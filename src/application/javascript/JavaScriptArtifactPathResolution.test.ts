@@ -3195,3 +3195,32 @@ it("resolves Node runtime entrypoints without substituting emitted TypeScript so
       ...(candidatePath === undefined ? {} : { candidate_path: candidatePath }),
     });
 });
+
+it.each([
+  [" ./dep.mjs", "external", null],
+  ["\n./dep.mjs", "external", null],
+  ["\t./dep.mjs", "external", null],
+  [".\n/dep.mjs", "rejected", null],
+  ["./dep.mjs", "resolved", "dep.mjs"],
+  ["./dep.mjs ", "resolved", "dep.mjs"],
+  ["./de\np.mjs", "resolved", "dep.mjs"],
+  ["./de\tp.mjs", "resolved", "dep.mjs"],
+] as const)(
+  "classifies ESM specifier whitespace correctly: %j",
+  (declaredPath, status, resolvedPath) => {
+    const files = fileMap([file("main.mjs", "root"), file("dep.mjs", "root")]);
+    expect(
+      resolve({
+        declaredPath,
+        sourcePath: "main.mjs",
+        context: "module-specifier",
+        moduleKind: "import",
+        files,
+      }),
+    ).toMatchObject({
+      resolution_status: status,
+      resolved_path: resolvedPath,
+      declared_path: declaredPath,
+    });
+  },
+);

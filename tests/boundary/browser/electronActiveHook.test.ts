@@ -1854,6 +1854,43 @@ it("preserves fatal process termination after recording uncaught exceptions", as
   expect(result.stderr).toContain("fatal-hook-secret");
 });
 
+it("preserves caller arguments and only removes the exact provider-injected hook", async () => {
+  const root = await createTestTempDirectory("rea-electron-hook-argv-");
+  await writeElectronFixture(root);
+  const script = join(root, "exercise.cjs");
+  await writeFile(
+    script,
+    'process.stdout.write(JSON.stringify(process.argv.slice(1)) + "\\n");\n',
+  );
+  const hook = await stageHook(root);
+  const child = spawn(
+    process.execPath,
+    [
+      "-r",
+      hook,
+      script,
+      "--open",
+      "/tmp/plugin.asar",
+      "electron-active-hook.cjs",
+    ],
+    {
+      cwd: root,
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  const stdout: Buffer[] = [];
+  child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
+  await new Promise((resolve) => child.once("close", resolve));
+  const argv = JSON.parse(Buffer.concat(stdout).toString("utf8"));
+  expect(argv).toEqual([
+    script,
+    "--open",
+    "/tmp/plugin.asar",
+    "electron-active-hook.cjs",
+  ]);
+});
+
 const writeElectronFixture = async (
   root: string,
   source = electronModuleSource,

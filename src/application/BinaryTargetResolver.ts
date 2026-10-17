@@ -413,7 +413,7 @@ const sha256Handle = async (
   signal?: AbortSignal,
 ): Promise<string> => {
   const hash = createHash("sha256");
-  const chunk = Buffer.allocUnsafe(64 * 1024);
+  const chunk = Buffer.alloc(64 * 1024);
   let position = 0;
   while (true) {
     throwIfTargetResolutionCancelled(signal);

@@ -4,6 +4,7 @@ import { localPathStringSchema } from "../domain/localPath.js";
 import type { ToolContract } from "./toolContractTypes.js";
 import { evidenceResultOf } from "./toolOutputSchemaPrimitives.js";
 import { toolContractMetadata } from "./toolEffects.js";
+import { singleCommandLineSchema } from "./singleCommandLineSchema.js";
 
 const sessionId = z.string().uuid();
 const commandResult = z.strictObject({
@@ -48,13 +49,7 @@ export const RIZIN_DEBUG_TOOL_CONTRACTS = [
       "Execute one unrestricted command in a persistent Rizin debugger session. Returns raw output inline with Evidence, including backend output interleaved before the completion marker. If the command exceeds the output or frame limit, `output_truncated` is true and `completion_status` is `unknown`; retained partial output is returned and the owned debugger session is stopped. Unsolicited frames already queued before the command make the session unavailable because correlation is ambiguous. Commands can access local files, shell, network, plugins, and target state; effects depend on the active backend and target. In a shared MCP server, this admitted command closes any active binary-analysis session; after its effects have settled, call open_binary before further analysis. Close an active Ghidra session explicitly first.",
     inputSchema: z.strictObject({
       session_id: sessionId,
-      command: z
-        .string()
-        .min(1)
-        .refine(
-          (value) => !/[\r\n]/u.test(value),
-          "A single command line is required",
-        ),
+      command: singleCommandLineSchema,
     }),
     outputSchema: evidenceResultOf(commandResult),
     examples: [

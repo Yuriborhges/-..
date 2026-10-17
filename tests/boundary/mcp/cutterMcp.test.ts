@@ -255,6 +255,18 @@ it("preserves live Cutter command Evidence and parity through the MCP boundary",
   });
   expect(session.evidenceById(evidence.evidence_id)).toEqual(evidence);
 
+  for (const invalid of ["iI\0extra", "iI\nextra", "iI\rextra"]) {
+    const invalidCall = await client.callTool({
+      name: "cutter_command",
+      arguments: {
+        session_id: sessionId,
+        expected_generation: 3,
+        command: invalid,
+      },
+    });
+    expect(invalidCall.isError).toBe(true);
+  }
+
   await assertNotStartedEvidenceAndAdmission(client, sessionId);
   await assertUncertainEvidence(client, session, sessionId);
 });

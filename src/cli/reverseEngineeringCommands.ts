@@ -21,6 +21,7 @@ import {
   gdbOneShotCommandMayInvalidateDetachProof,
 } from "../gdb/GdbSessionManager.js";
 import { RizinDebugSessionManager } from "../rizin/RizinDebugSessionManager.js";
+import { singleCommandLineSchema } from "../contracts/singleCommandLineSchema.js";
 
 const executeWithCleanup = async (
   service: ReverseEngineeringService,
@@ -289,11 +290,9 @@ export const registerReverseEngineeringCommands = (
       "Run one unrestricted Rizin debugger command in an ephemeral session",
     args: z.object({
       path: z.string().min(1).describe("Path to the local artifact to debug."),
-      command: z
-        .string()
-        .min(1)
-        .describe("One unrestricted Rizin debugger command.")
-        .refine((value) => !/[\r\n]/u.test(value)),
+      command: singleCommandLineSchema.describe(
+        "One unrestricted Rizin debugger command.",
+      ),
     }),
     options: z.object({
       inferiorTty: z

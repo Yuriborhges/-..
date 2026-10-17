@@ -497,6 +497,8 @@ const contextualCandidate = (
       "File URL authorities or invalid file URL forms cannot be mapped to artifact-local paths.",
     ]);
   }
+  const isLocalModuleSpecifier =
+    isRelativeJavaScriptModuleSpecifier(declared) || declared.startsWith("/");
   const hasUrlPathSemantics =
     context === "module-specifier" && input.moduleKind === "import";
   if (hasUrlPathSemantics) declared = htmlUrlText(declared);
@@ -510,11 +512,7 @@ const contextualCandidate = (
       return unresolvedCandidate("external", [
         "URL and Node builtin schemes are outside static artifact module resolution.",
       ]);
-    if (
-      !isRelativeJavaScriptModuleSpecifier(declared) &&
-      !declared.startsWith("/")
-    )
-      return bareModuleCandidate(input);
+    if (!isLocalModuleSpecifier) return bareModuleCandidate(input);
     if (input.moduleKind !== "require") {
       if (/%(?:2f|5c)/iu.test(stripQueryAndFragment(declared)))
         return unresolvedCandidate("rejected", [

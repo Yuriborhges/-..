@@ -39,3 +39,33 @@ it.each(
     ),
   ).toThrow();
 });
+
+it("preserves original cause and attaches capturedOutput on invalid JSON", () => {
+  const capturedOutput = {
+    stdout: "not json",
+    stderr: "some error",
+    truncated: false,
+  };
+  try {
+    parsePacketOutput("not json", ["ip.addr"], capturedOutput);
+    expect.unreachable("expected error");
+  } catch (err: unknown) {
+    expect(err).toBeInstanceOf(Error);
+    const analysisErr = err as { cause?: unknown; capturedOutput?: unknown };
+    expect(analysisErr.cause).toBeInstanceOf(SyntaxError);
+    expect(analysisErr.capturedOutput).toEqual(capturedOutput);
+  }
+});
+
+it("preserves original schema cause and attaches capturedOutput on schema mismatch", () => {
+  const capturedOutput = { stdout: "{}", stderr: "", truncated: false };
+  try {
+    parsePacketOutput("{}", ["ip.addr"], capturedOutput);
+    expect.unreachable("expected error");
+  } catch (err: unknown) {
+    expect(err).toBeInstanceOf(Error);
+    const analysisErr = err as { cause?: unknown; capturedOutput?: unknown };
+    expect(analysisErr.cause).toBeDefined();
+    expect(analysisErr.capturedOutput).toEqual(capturedOutput);
+  }
+});

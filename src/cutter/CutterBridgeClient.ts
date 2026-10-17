@@ -114,7 +114,7 @@ const serializeRequest = (
 
 class CutterBridgeResponseFrames {
   #parts: Buffer[] = [];
-  #page = Buffer.allocUnsafe(FRAME_PAGE_BYTES);
+  #page = Buffer.alloc(FRAME_PAGE_BYTES);
   #pageLength = 0;
   #contentBytes = 0;
   #framesRead = 0;
@@ -162,7 +162,7 @@ class CutterBridgeResponseFrames {
       copied += length;
       if (this.#pageLength === FRAME_PAGE_BYTES) {
         this.#parts.push(this.#page);
-        this.#page = Buffer.allocUnsafe(FRAME_PAGE_BYTES);
+        this.#page = Buffer.alloc(FRAME_PAGE_BYTES);
         this.#pageLength = 0;
       }
     }
@@ -170,7 +170,7 @@ class CutterBridgeResponseFrames {
 
   #reset(): void {
     this.#parts = [];
-    this.#page = Buffer.allocUnsafe(FRAME_PAGE_BYTES);
+    this.#page = Buffer.alloc(FRAME_PAGE_BYTES);
     this.#pageLength = 0;
     this.#contentBytes = 0;
   }

@@ -90,6 +90,15 @@ process.stdin.on("data", (chunk) => {
         arguments: { session_id: sessionId, command: "dr" },
       });
       expect(command.isError).not.toBe(true);
+
+      for (const invalid of ["dr\0", "dr\n", "dr\r", "dr\r\n"]) {
+        const rejected = await client.callTool({
+          name: "rizin_debug_command",
+          arguments: { session_id: sessionId, command: invalid },
+        });
+        expect(rejected.isError).toBe(true);
+      }
+
       const evidence = evidenceSchema.parse(command.structuredContent);
       expect(evidence.parameters.launch_provenance).toEqual({
         caller_selected_path: callerPath,

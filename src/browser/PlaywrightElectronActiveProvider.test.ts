@@ -1,8 +1,11 @@
 import { projectAnalysisError } from "../domain/analysisErrorProjection.js";
 import { cleanupElectronProcesses } from "./ElectronProcessCleanup.js";
 import { afterEach, expect, it, vi } from "vitest";
-import { writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
+import { ArtifactFileCleanupFailure } from "../artifacts/ArtifactFileOperation.js";
+import type { StableArtifactFileSystem } from "../artifacts/readStableArtifact.js";
 
 import { createTestTempDirectory } from "../../tests/fixtures/temporaryDirectory.js";
 import {
@@ -16,6 +19,7 @@ import * as electronActions from "./PlaywrightElectronActiveActions.js";
 import { electronActiveObservationInputSchema } from "../domain/javascript/electronActiveObservation.js";
 import type { OwnedProcessGroup } from "../process/ProcessOwnership.js";
 import {
+  executableContainsApplication,
   PlaywrightElectronActiveProvider,
   safeElectronEnvironment,
 } from "./PlaywrightElectronActiveProvider.js";
@@ -53,6 +57,217 @@ it("passes the selected environment and ownership token to Electron launch", asy
     PATH: "/selected/bin",
     REA_PROCESS_RUN_ID: expect.any(String),
   });
+});
+
+it("omits application_path from args when executable matches application", async () => {
+  let launchedArgs: readonly string[] | undefined;
+  const provider = new PlaywrightElectronActiveProvider({}, async (options) => {
+    launchedArgs = options?.args;
+    throw new Error("launch boundary reached");
+  });
+  await provider.capture({
+    ...electronActiveObservationInputSchema.parse({
+      executable_path: process.execPath,
+      application_path: process.execPath,
+      args: ["--user-data-dir=/tmp/profile"],
+    }),
+    application_root: dirname(process.execPath),
+  });
+
+  expect(launchedArgs).toEqual([
+    "-r",
+    expect.stringMatching(/electron-active-hook\.cjs$/),
+    "--user-data-dir=/tmp/profile",
+  ]);
+});
+
+it("includes application_path in args when executable differs from application", async () => {
+  let launchedArgs: readonly string[] | undefined;
+  const provider = new PlaywrightElectronActiveProvider({}, async (options) => {
+    launchedArgs = options?.args;
+    throw new Error("launch boundary reached");
+  });
+  const tempDir = await createTestTempDirectory("rea-electron-app-");
+  const asarPath = join(tempDir, "app.asar");
+  await writeFile(asarPath, "");
+  await provider.capture({
+    ...electronActiveObservationInputSchema.parse({
+      executable_path: process.execPath,
+      application_path: asarPath,
+      args: ["--no-sandbox"],
+    }),
+    application_root: tempDir,
+  });
+
+  expect(launchedArgs).toEqual([
+    "-r",
+    expect.stringMatching(/electron-active-hook\.cjs$/),
+    asarPath,
+    "--no-sandbox",
+  ]);
+});
+
+it("omits application_path from args when executable packages the application bundle", async () => {
+  let launchedArgs: readonly string[] | undefined;
+  const provider = new PlaywrightElectronActiveProvider({}, async (options) => {
+    launchedArgs = options?.args;
+    throw new Error("launch boundary reached");
+  });
+  const tempDir = await createTestTempDirectory("rea-packaged-app-");
+  const executablePath = join(tempDir, "drawio");
+  const asarPath = join(tempDir, "resources", "app.asar");
+  await mkdir(dirname(asarPath), { recursive: true });
+  await writeFile(executablePath, "");
+  await writeFile(asarPath, "");
+
+  await provider.capture({
+    ...electronActiveObservationInputSchema.parse({
+      executable_path: executablePath,
+      application_path: asarPath,
+      args: ["--open", "/tmp/diagram.drawio"],
+    }),
+    application_root: tempDir,
+  });
+
+  expect(launchedArgs).toEqual([
+    "-r",
+    expect.stringMatching(/electron-active-hook\.cjs$/),
+    "--open",
+    "/tmp/diagram.drawio",
+  ]);
+});
+
+it("omits application_path from args for macOS packaged app bundle", async () => {
+  let launchedArgs: readonly string[] | undefined;
+  const provider = new PlaywrightElectronActiveProvider({}, async (options) => {
+    launchedArgs = options?.args;
+    throw new Error("launch boundary reached");
+  });
+  const tempDir = await createTestTempDirectory("rea-mac-app-");
+  const appBundle = join(tempDir, "Draw.app");
+  const executablePath = join(appBundle, "Contents", "MacOS", "draw");
+  const asarPath = join(appBundle, "Contents", "Resources", "app.asar");
+  await mkdir(dirname(executablePath), { recursive: true });
+  await mkdir(dirname(asarPath), { recursive: true });
+  await writeFile(executablePath, "");
+  await writeFile(asarPath, "");
+
+  await provider.capture({
+    ...electronActiveObservationInputSchema.parse({
+      executable_path: executablePath,
+      application_path: asarPath,
+      args: ["--hidden"],
+    }),
+    application_root: appBundle,
+  });
+
+  expect(launchedArgs).toEqual([
+    "-r",
+    expect.stringMatching(/electron-active-hook\.cjs$/),
+    "--hidden",
+  ]);
+});
+
+it("identifies packaged executables correctly in executableContainsApplication", async () => {
+  expect(
+    await executableContainsApplication(
+      "/usr/lib/drawio/drawio",
+      "/usr/lib/drawio/resources/app.asar",
+    ),
+  ).toBe(true);
+  expect(
+    await executableContainsApplication(
+      "/usr/lib/drawio/drawio",
+      "/usr/lib/drawio/resources/app",
+    ),
+  ).toBe(true);
+  expect(
+    await executableContainsApplication(
+      "/usr/lib/drawio/drawio",
+      "/usr/lib/drawio/resources/app/main.js",
+    ),
+  ).toBe(true);
+  expect(
+    await executableContainsApplication(
+      "/opt/example/example",
+      "/opt/example/resources/app/main.js",
+    ),
+  ).toBe(true);
+  expect(
+    await executableContainsApplication(
+      "/opt/example/example",
+      "/opt/example/resources/app/index.js",
+    ),
+  ).toBe(true);
+  expect(
+    await executableContainsApplication(
+      "/opt/example/example",
+      "/opt/example/resources/app/worker.js",
+    ),
+  ).toBe(false);
+  expect(
+    await executableContainsApplication(
+      "/opt/example/example",
+      "/opt/example/resources/app/other-script.js",
+    ),
+  ).toBe(false);
+  expect(
+    await executableContainsApplication(
+      "/usr/lib/drawio/drawio",
+      "/usr/lib/drawio/resources/other-tool/index.js",
+    ),
+  ).toBe(false);
+  const abortedController = new AbortController();
+  abortedController.abort();
+  expect(
+    await executableContainsApplication(
+      "/opt/example/example",
+      "/opt/example/resources/app/worker.js",
+      abortedController.signal,
+    ),
+  ).toBe(false);
+  expect(
+    await executableContainsApplication(
+      "/Applications/draw.io.app/Contents/MacOS/draw.io",
+      "/Applications/draw.io.app/Contents/Resources/app.asar",
+    ),
+  ).toBe(true);
+  expect(
+    await executableContainsApplication(
+      "/Applications/draw.io.app/Contents/MacOS/draw.io",
+      "/Applications/draw.io.app",
+    ),
+  ).toBe(true);
+  expect(
+    await executableContainsApplication(
+      "/Applications/draw.io.app/Contents/MacOS/draw.io",
+      "/Applications/draw.io.app/Contents/Resources/separate-app",
+    ),
+  ).toBe(false);
+  expect(
+    await executableContainsApplication(
+      "/Applications/Electron.app/Contents/MacOS/Electron",
+      "/Applications/Electron.app/Contents/Resources/my-app",
+    ),
+  ).toBe(false);
+  expect(
+    await executableContainsApplication(
+      "/Applications/Electron.app/Contents/MacOS/Electron",
+      "/Applications/Electron.app/Contents/Resources/app.asar",
+    ),
+  ).toBe(false);
+  expect(
+    await executableContainsApplication(
+      "/usr/bin/electron",
+      "/tmp/external/app.asar",
+    ),
+  ).toBe(false);
+  expect(
+    await executableContainsApplication(
+      "/usr/bin/electron",
+      "/usr/bin/electron",
+    ),
+  ).toBe(true);
 });
 
 it("passes required Windows runtime variables without inheriting unrelated values", () => {
@@ -827,6 +1042,78 @@ it.each(["process", "transport"] as const)(
     expect(application.close).toHaveBeenCalledOnce();
   },
 );
+
+it("retains open descriptor owner in resource scope when package.json close fails", async () => {
+  const dir = await createTestTempDirectory("pkg-close-test-");
+  const pkgPath = join(dir, "resources", "app", "package.json");
+  await mkdir(dirname(pkgPath), { recursive: true });
+  await writeFile(pkgPath, JSON.stringify({ main: "main.js" }));
+
+  let allowClose = false;
+  const fileSystem: StableArtifactFileSystem = {
+    lstat: (selected: string) => lstat(selected, { bigint: true }),
+    open: async (p, flags) => {
+      const handle = await open(p, flags);
+      const nativeClose = handle.close.bind(handle);
+      handle.close = async () => {
+        if (!allowClose) throw new Error("simulated close failure");
+        await nativeClose();
+      };
+      return handle;
+    },
+  };
+
+  const scope = new ArtifactResourceScope();
+  const exePath = join(dir, "my-app");
+  const appPath = join(dir, "resources", "app", "main.js");
+
+  await expect(
+    executableContainsApplication(
+      exePath,
+      appPath,
+      undefined,
+      scope,
+      fileSystem,
+    ),
+  ).rejects.toBeInstanceOf(ArtifactFileCleanupFailure);
+
+  expect(scope.hasPending).toBe(true);
+
+  // Releasing close allows scope cleanup retry to succeed
+  allowClose = true;
+  await scope.close();
+  expect(scope.hasPending).toBe(false);
+
+  // Test provider capture reporting cleanup_failed with its own scope
+  const providerScope = new ArtifactResourceScope();
+  allowClose = false;
+  const provider = new PlaywrightElectronActiveProvider(
+    {},
+    undefined,
+    undefined,
+    providerScope,
+    fileSystem,
+  );
+  const result = await provider.capture({
+    ...electronActiveObservationInputSchema.parse({
+      executable_path: exePath,
+      application_path: appPath,
+    }),
+    application_root: dir,
+  });
+
+  expect(result.ok).toBe(false);
+  if (result.ok) throw new Error("Expected failure");
+  expect(result.error).toMatchObject({
+    _tag: "BrowserObservationError",
+    reason: "cleanup_failed",
+  });
+  expect(providerScope.hasPending).toBe(true);
+
+  allowClose = true;
+  await provider.close();
+  expect(providerScope.hasPending).toBe(false);
+});
 
 it.each(["process", "transport", "both"] as const)(
   "retains %s cleanup and blocks replacement capture until recovery",

@@ -514,3 +514,29 @@ it.each(["descriptor-first", "command-first"])(
     expect(mixed.cleanupIncomplete).toBe(false);
   },
 );
+
+it("rejects invalid command inputs containing NUL, CR, or LF without dispatching to the client provider", async () => {
+  const execute = vi.fn();
+  const confirm = vi.fn();
+  const service = new CutterBridgeService({
+    listSessions: async () => ({
+      sessions: [],
+      bridge_directory: "/private/bridge",
+      discovery_status: "no_live_bridge_found",
+      bridge_directory_security: "private_verified",
+    }),
+    execute,
+    confirmCommandCompletion: confirm,
+  });
+
+  for (const invalid of ["pd 4\0", "pd 4\n", "pd 4\r", "pd 4\r\nextra", "\0"]) {
+    const result = await service.execute({
+      session_id: "27d3e3f1-f1e5-49ae-91ec-95af1f343a5a",
+      expected_generation: 7,
+      command: invalid,
+    });
+    expect(result.ok).toBe(false);
+    expect(execute).not.toHaveBeenCalled();
+    expect(confirm).not.toHaveBeenCalled();
+  }
+});

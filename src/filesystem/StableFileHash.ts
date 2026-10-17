@@ -51,7 +51,7 @@ export const hashStableFile = async (
           `Regular file size cannot be represented safely: ${path}`,
         );
       const hash = createHash("sha256");
-      const chunk = Buffer.allocUnsafe(64 * 1024);
+      const chunk = Buffer.alloc(64 * 1024);
       let position = 0;
       while (position <= initial.size) {
         assertRegularFileActive(options.signal);

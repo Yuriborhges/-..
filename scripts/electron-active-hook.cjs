@@ -950,7 +950,62 @@ const boundaries = createElectronActiveBoundaryPatches({
   shape,
 });
 
+const isExactHook = (arg) => {
+  if (typeof arg !== "string") return false;
+  return (
+    arg === __filename ||
+    arg.replace(/\\/g, "/") === __filename.replace(/\\/g, "/")
+  );
+};
+
+const cleanHookArgv = (argv) => {
+  if (!Array.isArray(argv)) return;
+  for (let index = argv.length - 1; index >= 0; index--) {
+    const arg = argv[index];
+    if (typeof arg !== "string") continue;
+    if (
+      isExactHook(arg) &&
+      index > 0 &&
+      (argv[index - 1] === "-r" || argv[index - 1] === "--require")
+    ) {
+      argv.splice(index - 1, 2);
+    } else if (
+      arg.startsWith("--require=") &&
+      isExactHook(arg.slice("--require=".length))
+    ) {
+      argv.splice(index, 1);
+    }
+  }
+  if (!process.defaultApp) return;
+  let appIndex = -1;
+  for (let index = 1; index < argv.length; index++) {
+    const arg = argv[index];
+    if (typeof arg === "string" && !arg.startsWith("-")) {
+      appIndex = index;
+      break;
+    }
+  }
+  if (appIndex <= 1) return;
+  const appArg = argv[appIndex];
+  const debugFlags = argv
+    .slice(1, appIndex)
+    .filter(
+      (arg) =>
+        typeof arg === "string" &&
+        (arg.startsWith("--inspect") ||
+          arg.startsWith("--remote-debugging-port")),
+    );
+  argv.splice(appIndex, 1);
+  argv.splice(1, 0, appArg);
+  for (const flag of debugFlags) {
+    const idx = argv.indexOf(flag);
+    if (idx !== -1) argv.splice(idx, 1);
+  }
+};
+
 try {
+  cleanHookArgv(process.argv);
+
   const electron = require("electron");
   patchEmitter(electron.app, (event, args) =>
     recordRuntime(

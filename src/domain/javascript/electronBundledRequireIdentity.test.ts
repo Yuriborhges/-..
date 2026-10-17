@@ -47,7 +47,46 @@ describe("Electron identity through Webpack externals", () => {
   ])("does not infer Electron through %s", (_name, source) => {
     expect(electronOf(source).browser_windows).toEqual([]);
   });
+});
 
+describe("Electron identity through Webpack external destructuring and aliases", () => {
+  it("follows destructured Electron members from an external module binding", () => {
+    const source = bootstrap(
+      EXTERNAL,
+      'const s=n(45840);const { BrowserWindow, ipcMain } = s;new BrowserWindow({webPreferences:{preload:"./preload.js",contextIsolation:!1}});ipcMain.handle("get-connections",async()=>[]);',
+    );
+    const electron = electronOf(source);
+    expect(electron.browser_windows).toHaveLength(1);
+    expect(electron.ipc).toMatchObject([
+      { channel: "get-connections", side: "main" },
+    ]);
+  });
+
+  it("follows destructured Electron members captured inside an inner function or closure", () => {
+    const source = bootstrap(
+      EXTERNAL,
+      'const s=n(45840);function open(){const { BrowserWindow } = s;new BrowserWindow({webPreferences:{preload:"./preload.js",contextIsolation:!1}});}open();',
+    );
+    const electron = electronOf(source);
+    expect(electron.browser_windows).toHaveLength(1);
+    expect(electron.browser_windows[0]?.preload_path).toBe("./preload.js");
+  });
+
+  it("follows Electron members through deep alias chains", () => {
+    let chain = "const a0 = n(45840);\n";
+    for (let i = 1; i <= 30; i++) {
+      chain += `const a${i} = a${i - 1};\n`;
+    }
+    chain +=
+      'const { BrowserWindow } = a30; new BrowserWindow({webPreferences:{preload:"./deep.js"}});';
+    const source = bootstrap(EXTERNAL, chain);
+    const electron = electronOf(source);
+    expect(electron.browser_windows).toHaveLength(1);
+    expect(electron.browser_windows[0]?.preload_path).toBe("./deep.js");
+  });
+});
+
+describe("Webpack externals with mutated loader properties", () => {
   const GETTER_CONSUMER = "const s=n.n(n(45840));new (s().BrowserWindow)({});";
   it.each([
     ["Reflect.set", 'Reflect.set(n,"n",e=>()=>({BrowserWindow:class{}}));'],

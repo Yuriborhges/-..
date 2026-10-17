@@ -423,6 +423,27 @@ it("parses the Rizin inferior TTY as an option and passes it to the manager", as
     path: "./sample.bin",
     command: "dr",
   });
+
+  for (const invalid of ["\0", "dr\0", "dr\n", "dr\r", "dr\r\n", "dr\0extra"]) {
+    expect(() =>
+      argsSchema.parse({ path: "./sample.bin", command: invalid }),
+    ).toThrow();
+  }
+
+  for (const valid of [
+    "dr",
+    "px 20 @ rsp",
+    "echo \\0",
+    "echo \\n",
+    "print \\^@",
+    'cmd "literal\\0string"',
+  ]) {
+    expect(argsSchema.parse({ path: "./sample.bin", command: valid })).toEqual({
+      path: "./sample.bin",
+      command: valid,
+    });
+  }
+
   expect(optionsSchema.parse({ inferiorTty: "/dev/pts/7" })).toMatchObject({
     inferiorTty: "/dev/pts/7",
   });

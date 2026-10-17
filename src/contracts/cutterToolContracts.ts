@@ -3,6 +3,7 @@ import { jsonValueSchema } from "../domain/jsonValue.js";
 import type { ToolContract } from "./toolContractTypes.js";
 import { evidenceResultOf } from "./toolOutputSchemaPrimitives.js";
 import { toolContractMetadata } from "./toolEffects.js";
+import { singleCommandLineSchema } from "./singleCommandLineSchema.js";
 
 /** List live Cutter plugin bridge sessions. */
 export const cutterListInputSchema = z.strictObject({});
@@ -11,13 +12,7 @@ export const cutterListInputSchema = z.strictObject({});
 export const cutterCommandInputSchema = z.strictObject({
   session_id: z.string().uuid(),
   expected_generation: z.number().int().nonnegative(),
-  command: z
-    .string()
-    .min(1)
-    .refine(
-      (value) => !/[\r\n]/u.test(value),
-      "A single Rizin command line is required",
-    ),
+  command: singleCommandLineSchema,
   json: z.boolean().default(false),
 });
 

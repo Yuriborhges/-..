@@ -4,8 +4,10 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { Cli, z } from "incur";
 import { afterEach, describe, expect, it } from "vitest";
 
+import { createCli } from "../../../src/cli.js";
 import { serveCli } from "./cliServeHarness.js";
 import {
   spawnOwnedProviderProcess,
@@ -13,6 +15,10 @@ import {
 } from "../../../src/process/ProviderProcess.js";
 
 const SESSION_ID = "27d3e3f1-f1e5-49ae-91ec-95af1f343a5a";
+const registeredCommands = Cli.toCommands as WeakMap<
+  object,
+  Map<string, unknown>
+>;
 const listen = async (
   server: ReturnType<typeof createServer>,
 ): Promise<number> => {
@@ -269,6 +275,100 @@ describe("Cutter CLI command output flags", () => {
       );
       expect(compatible.exitCode).toBe(0);
       expect(commandJsonModes.at(-1)).toBe(expected);
+    }
+  });
+});
+
+describe("Cutter CLI command admission", () => {
+  let directory: string | undefined;
+  let server: ReturnType<typeof createServer> | undefined;
+
+  afterEach(async () => {
+    if (server !== undefined)
+      await new Promise<void>((resolve) => server?.close(() => resolve()));
+    if (directory !== undefined)
+      await rm(directory, { recursive: true, force: true });
+    directory = undefined;
+    server = undefined;
+  });
+
+  it("validates command args schema for Cutter CLI", () => {
+    const cli = createCli({});
+    const entry = registeredCommands.get(cli)?.get("cutter-command");
+    const argsSchema = Reflect.get(entry ?? {}, "args");
+    if (!(argsSchema instanceof z.ZodObject)) {
+      throw new Error("cutter-command args schema was not registered");
+    }
+
+    for (const invalid of [
+      "\0",
+      "pdi\0",
+      "pdi\n",
+      "pdi\r",
+      "pdi\r\n",
+      "pdi\0extra",
+    ]) {
+      expect(() =>
+        argsSchema.parse({
+          sessionId: SESSION_ID,
+          expectedGeneration: "0",
+          command: invalid,
+        }),
+      ).toThrow();
+    }
+
+    for (const valid of [
+      "pdi",
+      "echo \\0",
+      "echo \\n",
+      "print \\^@",
+      'cmd "literal\\0string"',
+    ]) {
+      expect(
+        argsSchema.parse({
+          sessionId: SESSION_ID,
+          expectedGeneration: "0",
+          command: valid,
+        }),
+      ).toMatchObject({ command: valid, expectedGeneration: 0 });
+    }
+  });
+
+  it("rejects command inputs containing NUL, CR, or LF at CLI admission boundary without contacting server", async () => {
+    directory = await mkdtemp(join(tmpdir(), "rea-cutter-cli-test-"));
+    let serverContacted = false;
+    server = createServer(() => {
+      serverContacted = true;
+    });
+    const port = await listen(server);
+    await writeFile(
+      join(directory, `cutter-${process.pid}-${SESSION_ID}.json`),
+      JSON.stringify({
+        session_id: SESSION_ID,
+        pid: process.pid,
+        host: "127.0.0.1",
+        port,
+        token: "synthetic-token",
+        document_generation: 0,
+        current_file: null,
+        cutter_version: "Cutter fixture",
+        identity_status: "partial",
+      }),
+      { mode: 0o600 },
+    );
+
+    for (const invalid of [
+      "pdi\0extra",
+      "pdi\nextra",
+      "pdi\rextra",
+      "pdi\r\nextra",
+    ]) {
+      const result = await serveCli(
+        ["cutter-command", SESSION_ID, "0", invalid, "--json"],
+        { REA_CUTTER_BRIDGE_DIR: directory },
+      );
+      expect(result.exitCode).toBe(1);
+      expect(serverContacted).toBe(false);
     }
   });
 });
