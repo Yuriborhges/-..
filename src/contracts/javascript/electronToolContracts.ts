@@ -1,3 +1,5 @@
+import { isAbsolute } from "node:path";
+
 import type { ToolContract } from "../toolContractTypes.js";
 import { toolContractMetadata } from "../toolEffects.js";
 import { electronFuseOutputSchemas } from "../toolOutputSchemaGroups.js";
@@ -26,6 +28,7 @@ import {
   javascriptRuntimeReconciliationResultSchema,
   reconcileJavaScriptRuntimeInputSchema,
 } from "../../domain/javascript/javascriptRuntimeReconciliationSchemas.js";
+import { localPathStringSchema } from "../../domain/localPath.js";
 import { JAVASCRIPT_RUNTIME_RECONCILIATION_EXAMPLE } from "./javascriptRuntimeReconciliationExample.js";
 
 const listOutputSchema = evidenceResultOf(electronTargetListSchema);
@@ -33,6 +36,16 @@ const inspectionOutputSchema = evidenceResultOf(electronPageInspectionSchema);
 /** Caller-selected delivery of a completed JavaScript application analysis. */
 export const analyzeJavaScriptApplicationRequestSchema =
   analyzeJavaScriptApplicationInputSchema.extend({
+    // MCP servers start in a launcher-chosen directory, so a relative path
+    // would select content by server location rather than caller intent.
+    input_path: localPathStringSchema
+      .refine(isAbsolute, {
+        message:
+          "input_path must be an absolute local filesystem path (for example /tmp/app.asar or C:\\apps\\app.asar)",
+      })
+      .describe(
+        "Absolute local filesystem path to the ASAR or extracted application directory; relative paths are rejected.",
+      ),
     detail: analysisDetailSchema,
   });
 const applicationOutputSchema = analysisDetailOutputSchemaOf(
