@@ -168,8 +168,12 @@ tree semantics, vulnerability scanning, emulation or hardware runtime capture.
   `--max-output-files`). Depth defaults to 3, allowed range 1–10.
 
 Staging budgets are polled and rechecked after exit; short-lived overshoot is
-possible. The inherited file-size limit bounds each file, not total storage;
-address-space limits are per process, not an aggregate memory quota. Worker
+possible. The inherited file-size limit bounds each file, not total storage.
+Inspection uses the 8 MiB report budget; extraction uses the larger of that
+and the staging byte budget, so a smaller staging budget does not truncate the
+producer's report or log, and one staged file can reach 8 MiB before polling
+or the final inventory rejects it.
+Address-space limits are per process, not an aggregate memory quota. Worker
 count is not CPU affinity for every external extractor. These limits do not
 claim cgroup/container containment. Cancellation cleans the owned process group
 before removing its workspace; uncertain cleanup retains resources and blocks

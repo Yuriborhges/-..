@@ -122,11 +122,19 @@ export const runFirmwareCommand = async (context: {
   if (signal.aborted)
     throw new AnalysisCancelledError(operation, { cause: signal.reason });
   const runId = `rea-firmware-${randomUUID()}`;
+  // RLIMIT_FSIZE applies to every regular file the producer writes, including
+  // its mandatory report and log outside the staging tree. Polling and the
+  // final inventory enforce the aggregate staging budget, so this per-file
+  // ceiling admits the largest single file either budget allows.
+  const fileSizeLimit = Math.max(
+    context.outputBudget?.bytes ?? 0,
+    FIRMWARE_LIMITS.reportBytes,
+  );
   const spawned = await (context.launcher ?? spawnOwnedProviderProcess)({
     command: context.limiter,
     arguments: [
       `--as=${FIRMWARE_LIMITS.addressSpaceBytes}`,
-      `--fsize=${context.outputBudget?.bytes ?? FIRMWARE_LIMITS.reportBytes}`,
+      `--fsize=${fileSizeLimit}`,
       "--core=0",
       "--cpu=120",
       "--",
