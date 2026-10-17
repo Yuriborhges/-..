@@ -50,6 +50,11 @@ export interface JavaScriptAnalysisAccumulator {
       | t.NewExpression;
     readonly name: string;
   }[];
+  /** Resolved keyed-collection reads held until mutation facts are indexed. */
+  readonly pendingKeyedCollectionReads: {
+    readonly node: t.CallExpression | t.OptionalCallExpression;
+    readonly name: string;
+  }[];
   readonly pendingSqliteCalls: {
     readonly node:
       | t.CallExpression
@@ -123,6 +128,7 @@ export const createJavaScriptAnalysisAccumulator = (
   references: [],
   endpoints: [],
   pendingNetworkCalls: [],
+  pendingKeyedCollectionReads: [],
   storage: [],
   pendingSqliteCalls: [],
   roles: [],

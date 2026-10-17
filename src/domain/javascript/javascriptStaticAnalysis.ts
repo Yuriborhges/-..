@@ -22,6 +22,7 @@ import {
 import {
   addReference,
   addSourceMapDirectives,
+  finishKeyedCollectionReads,
   finishPartialNetworkEndpoints,
   finishSqliteStorageCalls,
   inspectCall,
@@ -104,10 +105,12 @@ export function* analyzeParsedJavaScriptStaticSourceSteps(
   yield* finishElectronBrowserWindowsSteps(findings, index);
   if (
     accumulator.pendingNetworkCalls.length > 0 ||
+    accumulator.pendingKeyedCollectionReads.length > 0 ||
     accumulator.pendingSqliteCalls.length > 0
   ) {
     yield* index.indexMemberMutationFactsSteps();
     finishPartialNetworkEndpoints(findings, bindings, index);
+    finishKeyedCollectionReads(findings, bindings, index);
     finishSqliteStorageCalls(findings, bindings, index);
   }
   accumulator.electronCallPaths = collectElectronWrappedCallPaths(

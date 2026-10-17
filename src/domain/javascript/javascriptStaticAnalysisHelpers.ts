@@ -550,7 +550,8 @@ const xhrOpenUrl = (
     : undefined;
 };
 
-const KEYED_COLLECTION_CONSTRUCTORS = new Set([
+/** Built-in constructors whose instances take keys, not request URLs. */
+export const KEYED_COLLECTION_CONSTRUCTORS = new Set([
   "FormData",
   "Headers",
   "Map",

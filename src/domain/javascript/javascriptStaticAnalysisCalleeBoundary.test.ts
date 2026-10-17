@@ -72,6 +72,119 @@ it.each(expressionWrappers)(
   },
 );
 
+it("omits resolved keyed-collection receivers from network classification", () => {
+  const analysis = analyzeJavaScriptStaticSource(`
+    const records = new Map([["/accounts", { name: "Alice" }]]);
+    records.get("/accounts");
+    records.delete("/settings");
+    const aliased = records;
+    aliased.get("./accounts");
+    new Map([["/a", 1]]).get("/a");
+    let reassigned = new Map();
+    reassigned = records;
+    reassigned.get("/changed");
+    const conditional = flag ? new Map() : records;
+    conditional.get("/conditional");
+    records.put("/not-a-keyed-method");
+    class LocalMap {}
+    const shadowed = new LocalMap();
+    shadowed.get("/local-constructor");
+  `);
+  expect(analysis.parse_error_count).toBe(0);
+  expect(analysis.parse_status).toBe("complete");
+  expect(
+    analysis.endpoints.map(({ value, interpretation }) => [
+      value,
+      interpretation ?? null,
+    ]),
+  ).toEqual([
+    // records.get is the first observable read of a never-escaped binding:
+    // suppressed. records.delete and aliased.get run after the earlier call
+    // escaped the receiver, so they keep the previous classification.
+    ["/settings", null],
+    ["./accounts", null],
+    ["/a", null],
+    ["/changed", null],
+    ["/conditional", null],
+    ["/not-a-keyed-method", null],
+    ["/local-constructor", null],
+  ]);
+});
+
+it("retains overwritten keyed-collection methods and re-pointed constructors", () => {
+  const analysis = analyzeJavaScriptStaticSource(`
+    const records = new Map();
+    records.get = client.get.bind(client);
+    records.get("/accounts");
+    const owned = new Map();
+    owned.delete("q");
+    owned.delete = client.delete.bind(client);
+    owned.delete("/settings");
+    const aliased = records;
+    aliased.get("./accounts");
+    globalThis.Map = ApiClient;
+    const remapped = new Map();
+    remapped.get("/api");
+  `);
+  expect(analysis.parse_error_count).toBe(0);
+  expect(analysis.parse_status).toBe("complete");
+  expect(
+    analysis.endpoints.map(({ value, mechanism }) => [value, mechanism]),
+  ).toEqual([
+    // Every read keeps its previous classification: the method overrides or
+    // the overwritten globalThis.Map constructor invalidate the keyed-collection
+    // resolution for each call site. Endpoints sort by source offset, and the
+    // suppressed, non-literal candidate "q" survives the earlier "records"
+    // method escape through the override itself.
+    ["/accounts", "call:records.get"],
+    ["q", "call:owned.delete"],
+    ["/settings", "call:owned.delete"],
+    ["./accounts", "call:aliased.get"],
+    ["/api", "call:remapped.get"],
+  ]);
+});
+
+it("retains uncalled deferred reads for mutated methods after timing boundaries", () => {
+  const analysis = analyzeJavaScriptStaticSource(`
+    const later = new Map();
+    later.get("/before");
+    later.get = client.get.bind(client);
+    later.get("/after");
+  `);
+  expect(analysis.parse_error_count).toBe(0);
+  expect(analysis.parse_status).toBe("complete");
+  expect(
+    analysis.endpoints.map(({ value, mechanism }) => [value, mechanism]),
+  ).toEqual([["/after", "call:later.get"]]);
+});
+
+it("retains reads after built-in prototype method and object overrides", () => {
+  const methodOverride = analyzeJavaScriptStaticSource(`
+    Map.prototype.get = client.get.bind(client);
+    const shared = new Map();
+    shared.get("/api");
+  `);
+  expect(methodOverride.parse_error_count).toBe(0);
+  expect(methodOverride.parse_status).toBe("complete");
+  expect(
+    methodOverride.endpoints.map(({ value, mechanism }) => [value, mechanism]),
+  ).toEqual([["/api", "call:shared.get"]]);
+
+  const prototypeOverride = analyzeJavaScriptStaticSource(`
+    Map.prototype = new Fake();
+    const replaced = new Map();
+    replaced.get("/override");
+  `);
+  expect(prototypeOverride.parse_error_count).toBe(0);
+  expect(prototypeOverride.parse_status).toBe("complete");
+  expect(
+    prototypeOverride.endpoints.map(({ value, mechanism }) => [
+      value,
+      mechanism,
+    ]),
+  ).toEqual([["/override", "call:replaced.get"]]);
+});
+
 it("retains uncertainty and module evidence for wrapped get receivers", () => {
   const analysis = analyzeJavaScriptStaticSource(`
     const vscode = otherLibrary;

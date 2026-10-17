@@ -8,6 +8,7 @@ import {
   addLocatedFinding,
 } from "./javascriptStaticAnalysisFindings.js";
 import {
+  KEYED_COLLECTION_CONSTRUCTORS,
   STATIC_ROUTE_CALL_NAMES,
   argumentNode,
   argumentValue,
@@ -472,6 +473,19 @@ const inspectEndpointCall = (
   // A local or shadowed function with a familiar network name is not a known
   // browser request API. Do not let the literal fallback turn it into one.
   if (isNetworkRequestSpelling(name)) return;
+  const gateMethod = keyedReadMethod(name);
+  if (
+    !t.isNewExpression(node) &&
+    first !== undefined &&
+    gateMethod !== undefined &&
+    isResolvedKeyedCollectionReceiver(bindings, node.callee, gateMethod)
+  ) {
+    // The receiver resolves to a built-in keyed collection during this
+    // traversal, but its own methods are only provably unmodified after the
+    // shared member-mutation facts are indexed. Hold the read until then.
+    context.accumulator.pendingKeyedCollectionReads.push({ node, name });
+    return;
+  }
   const receiverFact = context.openReceiverFacts?.get(node.start ?? -1);
   const endpoint = endpointArgumentHelper(
     name,
@@ -546,6 +560,141 @@ export const finishPartialNetworkEndpoints = (
   context.accumulator.pendingNetworkCalls.length = 0;
   context.accumulator.endpoints.sort(
     (left, right) => left.offset - right.offset,
+  );
+};
+
+/** Finish resolved keyed-collection reads after mutation facts are indexed. */
+export const finishKeyedCollectionReads = (
+  context: FindingContext,
+  bindings: JavaScriptSemanticAnalysisState,
+  index: JavaScriptBindingIndex,
+): void => {
+  for (const { node, name } of context.accumulator
+    .pendingKeyedCollectionReads) {
+    if (keyedCollectionReadChanged(node, name, bindings, index)) {
+      const endpoint = endpointArgumentHelper(
+        name,
+        node.arguments,
+        node.callee,
+        context.openReceiverFacts?.get(node.start ?? -1),
+      );
+      if (endpoint !== undefined)
+        addEndpoint(context, {
+          node,
+          kind: "network",
+          value: endpoint.value,
+          mechanism: `call:${name}`,
+          ...(endpoint.kind === "candidate"
+            ? { interpretation: "candidate" }
+            : {}),
+        });
+    }
+  }
+  context.accumulator.pendingKeyedCollectionReads.length = 0;
+  context.accumulator.endpoints.sort(
+    (left, right) => left.offset - right.offset,
+  );
+};
+
+/**
+ * Whether any observable read of the resolved chain may have changed before
+ * the call: an overwritten method, a whole reassignment, or an unresolved
+ * effect keeps the previous endpoint classification for this call.
+ */
+const keyedCollectionReadChanged = (
+  node: t.CallExpression | t.OptionalCallExpression,
+  name: string,
+  bindings: JavaScriptSemanticAnalysisState,
+  index: JavaScriptBindingIndex,
+): boolean => {
+  const method = keyedReadMethod(name);
+  if (method === undefined) return true;
+  const chain = keyedCollectionChain(bindings, node.callee, method);
+  if (chain === undefined) return true;
+  for (const reference of chain) {
+    if (index.referenceMayHaveChangedAt(node, reference, [method])) return true;
+  }
+  return false;
+};
+
+/** Match the keyed-collection read methods whose keys are never request URLs. */
+const keyedReadMethod = (name: string): "get" | "delete" | undefined =>
+  name === "get" || name.endsWith(".get")
+    ? "get"
+    : name === "delete" || name.endsWith(".delete")
+      ? "delete"
+      : undefined;
+
+/**
+ * Whether the call receiver resolves through immutable bindings to a built-in
+ * keyed-collection construction with a proven unmodified global constructor.
+ * Spelling alone does not prove the binding; this resolution does.
+ */
+const isResolvedKeyedCollectionReceiver = (
+  bindings: JavaScriptSemanticAnalysisState,
+  callee: t.Node,
+  method: "get" | "delete",
+): boolean => keyedCollectionChain(bindings, callee, method) !== undefined;
+
+/** Reference identifiers from the receiver to its keyed-collection initializer. */
+const keyedCollectionChain = (
+  bindings: JavaScriptSemanticAnalysisState,
+  callee: t.Node,
+  method: "get" | "delete",
+): readonly t.Identifier[] | undefined => {
+  const member = unwrapJavaScriptExpression(callee).node;
+  if (!t.isMemberExpression(member) && !t.isOptionalMemberExpression(member))
+    return undefined;
+  let current = unwrapJavaScriptExpression(member.object).node;
+  if (!t.isIdentifier(current)) return undefined;
+  const chain: t.Identifier[] = [current];
+  for (let hop = 0; hop < 2; hop += 1) {
+    const binding = resolveSemanticBindingState(
+      bindings,
+      current,
+      current.name,
+    );
+    if (
+      binding === undefined ||
+      binding.mutable ||
+      binding.initializers.length !== 1
+    )
+      return undefined;
+    const initializer = semanticStableInitializer(binding, bindings);
+    if (initializer === undefined || initializer.projection.length !== 0)
+      return undefined;
+    const expression = unwrapJavaScriptExpression(initializer.node).node;
+    if (isKeyedCollectionConstruction(expression, bindings, method))
+      return chain;
+    if (hop === 1 || !t.isIdentifier(expression)) return undefined;
+    current = expression;
+    chain.push(current);
+  }
+  return undefined;
+};
+
+/** Confirm that an expression constructs a built-in keyed collection. */
+const isKeyedCollectionConstruction = (
+  expression: t.Node,
+  bindings: JavaScriptSemanticAnalysisState,
+  method: "get" | "delete",
+): boolean => {
+  const construction = unwrapJavaScriptExpression(expression).node;
+  if (!t.isNewExpression(construction)) return false;
+  const constructor = unwrapJavaScriptExpression(construction.callee).node;
+  return (
+    t.isIdentifier(constructor) &&
+    KEYED_COLLECTION_CONSTRUCTORS.has(constructor.name) &&
+    isUnmodifiedGlobalReference(constructor, bindings, constructor.name) &&
+    // A prototype override replaces the built-in method for every instance,
+    // so an unmodified constructor alone does not prove the built-in method.
+    !bindings.ambientWrites.covers([
+      "global",
+      constructor.name,
+      "prototype",
+      method,
+    ]) &&
+    !bindings.ambientWrites.covers(["global", constructor.name, "prototype"])
   );
 };
 
