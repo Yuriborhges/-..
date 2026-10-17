@@ -314,8 +314,12 @@ const captureResources = async (
   );
 };
 
-const captureDom = async (
-  context: ElectronContext,
+export const captureDom = async (
+  context: {
+    readonly connection: Pick<CdpConnection, "send">;
+    readonly sessionId?: string | undefined;
+    readonly signal?: AbortSignal | undefined;
+  },
   completeness: CdpCaptureCompleteness,
 ): Promise<ElectronPageInspection["dom"]> => {
   const result = requiredRecord(
