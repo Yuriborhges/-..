@@ -60,6 +60,7 @@ import {
 import { semanticRequireOrigin } from "./javascriptSemanticRequireOrigin.js";
 import { semanticBundledRequireOrigin } from "./javascriptBundledRequireOrigin.js";
 import { collectSemanticMemberMutationsSteps } from "./javascriptSemanticMemberMutations.js";
+import { semanticPromiseSettlementDependency } from "./javascriptSemanticPromiseIdentity.js";
 import { semanticEffectTiming } from "./javascriptSemanticMutationInitializers.js";
 import {
   indexJavaScriptAmbientWritesSteps,
@@ -84,7 +85,10 @@ import {
   electronMemberPath,
   ELECTRON_MODULE,
 } from "./javascriptElectronMemberWrites.js";
-import { range } from "./javascriptStaticAnalysisHelpers.js";
+import {
+  isWebSocketEndpointCandidate,
+  range,
+} from "./javascriptStaticAnalysisHelpers.js";
 import { semanticCoverage } from "./javascriptSemanticCoverage.js";
 import { semanticResourceLimitReason } from "./javascriptSemanticResourceLimits.js";
 import {
@@ -423,6 +427,10 @@ export type JavaScriptOpenReceiverFact =
 export interface JavaScriptReceiverFacts {
   readonly openReceivers: ReadonlyMap<number, JavaScriptOpenReceiverFact>;
   readonly rpcClientRoots: ReadonlySet<t.Node>;
+  /** This syntax needs ambient-write facts before endpoint interpretation. */
+  readonly hasWebSocketEndpointCandidate: boolean;
+  /** Constructor and consumed-pattern projections require alias-aware effects. */
+  readonly requiresWebSocketValueEffects: boolean;
 }
 
 export interface JavaScriptReceiverIndex extends JavaScriptBindingIndex {
@@ -505,6 +513,9 @@ function* classifyDefinitionReceiversSteps(
   const extensionStateReads: number[] = [];
   const roots = new Set<t.Node>();
   const clients = new Map<string, boolean>();
+  let hasWebSocketEndpointCandidate = false;
+  let requiresWebSocketValueEffects = false;
+  let hasPatternConsumer = false;
   const classifyRpcRoot = (node: t.Node): void => {
     if (!t.isMemberExpression(node) && !t.isOptionalMemberExpression(node))
       return;
@@ -604,6 +615,23 @@ function* classifyDefinitionReceiversSteps(
   };
   yield* traverseJavaScriptAstSteps(program, {
     enter: (node) => {
+      if (t.isArrayPattern(node) || t.isObjectPattern(node))
+        hasPatternConsumer = true;
+      if (
+        (t.isCallExpression(node) ||
+          t.isOptionalCallExpression(node) ||
+          t.isNewExpression(node)) &&
+        isWebSocketEndpointCandidate(node.callee, state, () => {
+          requiresWebSocketValueEffects = true;
+        })
+      )
+        hasWebSocketEndpointCandidate = true;
+      // Awaited aliases can project literal promises even when the constructor
+      // itself is a plain binding. Request the same completed effect facts.
+      if (t.isAwaitExpression(node))
+        semanticPromiseSettlementDependency(node.argument, state, () => {
+          requiresWebSocketValueEffects = true;
+        });
       classifyRpcRoot(node);
       classifyOpenReceiver(node);
     },
@@ -611,7 +639,14 @@ function* classifyDefinitionReceiversSteps(
   if (extensionStateReads.length > 0 && importsVsCodeModule(state))
     for (const start of extensionStateReads)
       facts.set(start, "extension-state");
-  return { openReceivers: facts, rpcClientRoots: roots };
+  return {
+    openReceivers: facts,
+    rpcClientRoots: roots,
+    hasWebSocketEndpointCandidate,
+    requiresWebSocketValueEffects:
+      requiresWebSocketValueEffects ||
+      (hasWebSocketEndpointCandidate && hasPatternConsumer),
+  };
 }
 
 /** VS Code passes extension state through ExtensionContext, not an import. */
@@ -928,6 +963,7 @@ const createState = (
     valueResourceLimits: new Set(),
     getterResourceLimits: new Set(),
     parentsByNode: new WeakMap(),
+    awaitSites: [],
     scopes: [root],
     scopesById: new Map([[root.scopeId, root]]),
     scopeByNode: new WeakMap([[program, root]]),
@@ -972,6 +1008,7 @@ function* collectDefinitionsSteps(
   yield* traverseJavaScriptAstSteps(program, {
     enter: (node, parent, readAncestors) => {
       if (parent !== null) state.parentsByNode.set(node, parent);
+      if (t.isAwaitExpression(node)) state.awaitSites.push(node);
       if (
         t.isWithStatement(node) ||
         t.isForInStatement(node) ||
@@ -1344,7 +1381,6 @@ const bindImportEquals = (
   state: JavaScriptSemanticAnalysisState,
 ): void => {
   const specifier = semanticImportEqualsSpecifier(node);
-  if (specifier === null) return;
   addBinding({
     state,
     scope,
@@ -1353,7 +1389,15 @@ const bindImportEquals = (
     mutable: false,
     definitionNode: node.id,
     initializer: null,
-    directOrigin: { specifier, importedPath: [], resolutionMode: "require" },
+    ...(specifier === null
+      ? {}
+      : {
+          directOrigin: {
+            specifier,
+            importedPath: [],
+            resolutionMode: "require" as const,
+          },
+        }),
   });
 };
 
@@ -1784,8 +1828,13 @@ const addBinding = (input: AddBindingInput): void => {
   if (declarationKind !== undefined)
     binding.declarationKinds.add(declarationKind);
   binding.definitions.push({ kind, location: range(definitionNode) });
+  binding.definitionNodes.push(definitionNode);
   if (initializer !== null)
-    binding.initializers.push({ node: initializer, projection });
+    binding.initializers.push({
+      node: initializer,
+      projection,
+      bindingNode: definitionNode,
+    });
   if (directOrigin !== undefined)
     binding.directOrigins.push(
       directOrigin.resolutionMode === undefined &&
@@ -1814,6 +1863,7 @@ const createBinding = (
   memberWrites: [],
   escapedPaths: [],
   definitions: [],
+  definitionNodes: [],
   initializers: [],
   referenceInitializers: [],
   directOrigins: [],
