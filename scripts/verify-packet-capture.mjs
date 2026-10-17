@@ -268,7 +268,7 @@ try {
     const capinfosOutput = (
       await execute(
         process.env.REA_CAPINFOS_COMMAND ?? "capinfos",
-        ["-M", "--", capturePath],
+        ["-M", "-S", "--", capturePath],
         {
           env: { ...environment, LC_ALL: "C", LANG: "C" },
           timeout: 60000,
@@ -276,14 +276,24 @@ try {
         },
       )
     ).stdout;
-    const expectedCaptureStart =
+    // The oracle reads the epoch spelling of -S independently of the product:
+    // whole seconds through Date, the fractional digits kept as printed.
+    const epochInstant = (text) => {
+      const match = /^(\d+)(?:\.(\d+))?$/u.exec(text ?? "");
+      if (match === null) return null;
+      const iso = new Date(Number(match[1]) * 1000).toISOString().slice(0, 19);
+      return `${iso}${match[2] === undefined ? "" : `.${match[2]}`}Z`;
+    };
+    const expectedCaptureStart = epochInstant(
       /^(?:Earliest|First) packet time:[ \t]*(.+)$/mu
         .exec(capinfosOutput)?.[1]
-        ?.trim() ?? null;
-    const expectedCaptureEnd =
+        ?.trim(),
+    );
+    const expectedCaptureEnd = epochInstant(
       /^(?:Latest|Last) packet time:[ \t]*(.+)$/mu
         .exec(capinfosOutput)?.[1]
-        ?.trim() ?? null;
+        ?.trim(),
+    );
     assert.ok(expectedCaptureStart, capinfosOutput);
     assert.ok(expectedCaptureEnd, capinfosOutput);
     const response = await client.callTool({
